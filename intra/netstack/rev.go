@@ -151,6 +151,12 @@ func (t *revtcp) Proxy(in *GTCPConn, src, dst netip.AddrPort) bool {
 	if end {
 		return false
 	}
+	if open, err := in.Establish(); !open || err != nil {
+		logeif(err)("rev: %s: revtcp: establish failed %v <= %v; open? %t, err? %v",
+			t.o, src, dst, open, err)
+		in.Close()
+		return false
+	}
 	// dst is local (just the port number assuming listening sockets)
 	// to t.revstack to dial into; src is remote to t.revstack
 	// ex: src 1.1.1.1:5555 / dst 10.0.1.1:1111

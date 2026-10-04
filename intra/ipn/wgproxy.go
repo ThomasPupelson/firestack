@@ -99,6 +99,7 @@ type wgifopts struct {
 	eps              *multihost.MHMap
 	mtu              int
 	amnezia          *wg.Amnezia
+	AllowIncoming    bool
 }
 
 type wgtun struct {
@@ -167,6 +168,7 @@ type wgtun struct {
 	latestTx        atomic.Int64          // last (successful or not) tx time in unix millis
 	errRx           atomic.Int64          // rx error count
 	errTx           atomic.Int64          // tx error count
+	allowincoming   atomic.Bool
 }
 
 type wgconn interface {
@@ -261,10 +263,10 @@ func (h *wgproxy) GetAddr() string {
 func (w *wgproxy) OnProtoChange(lp LinkProps) (string, bool) {
 	oldmtu := w.netmtu.Swap(uint32(lp.mtu))
 	oldrev := w.rev.Swap(lp.rev)
-	setRev := settings.ExperimentalWireGuard.Load()
-	w.setupReverserIfNeeded(setRev)
+	w.reconcileP2P()
+	allow := w.allowincoming.Load()
 	log.V("proxy: wg: %s; lp changed; setReverser? %t, l3: %s, mtu %d=>%d, rev %X => %X",
-		w.tag(), setRev, lp.l3, lp.mtu, oldmtu, oldrev, lp.rev)
+		w.tag(), allow, lp.l3, lp.mtu, oldmtu, oldrev, lp.rev)
 	if err := w.Refresh(); err != nil {
 		log.W("proxy: wg: %s; lp changed; err: %v", w.tag(), err)
 		// TODO: return w.cfg, true
@@ -676,6 +678,9 @@ func wgIfConfigOf(id string, txtptr *string) (opts wgifopts, err error) {
 			// a public_key line points to a transition to a new peer
 			// github.com/WireGuard/wireguard-go/blob/12269c2761/device/uapi.go#L295
 			currentPeer = multihost.New(id + ":" + v) // next peer
+		case "allowincoming":
+			opts.AllowIncoming = v == "true" || v == "1"
+			log.D("proxy: wg: %s ifconfig: allowincoming? %t", id, opts.AllowIncoming)
 		case "client_id":
 			// only for warp: blog.cloudflare.com/warp-technical-challenges
 			// When we begin a WireGuard session we include our clientid field
@@ -907,6 +912,12 @@ func (w *wgtun) viaStatus() (s string) {
 	return s
 }
 
+func (t *wgtun) reconcileP2P() {
+	allow := t.allowincoming.Load()
+	t.maybeSpoof(allow)
+	t.setupReverserIfNeeded(allow)
+}
+
 func (t *wgtun) maybeSpoof(spoof bool) {
 	log.I("proxy: wg: %s spoofing? %t", t.tag(), spoof)
 	// github.com/xjasonlyu/tun2socks/blob/31468620e/core/stack.go#L80
@@ -919,7 +930,7 @@ func (t *wgtun) maybeSpoof(spoof bool) {
 func makeWgTun(pctx context.Context, id, cfg string, ctl protect.Controller, px ProxyProvider, lp LinkProps, ifopts wgifopts) (*wgtun, error) {
 	ctx, done := context.WithCancel(pctx)
 
-	allowIncoming := settings.ExperimentalWireGuard.Load()
+	allowIncoming := ifopts.AllowIncoming
 	opts := stack.Options{
 		NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
 		TransportProtocols: []stack.TransportProtocolFactory{tcp.NewProtocol, udp.NewProtocol, icmp.NewProtocol6, icmp.NewProtocol4},
@@ -985,10 +996,8 @@ func makeWgTun(pctx context.Context, id, cfg string, ctl protect.Controller, px 
 		return nil, fmt.Errorf("wg: %s create nic: %v", t.who(), err)
 	}
 
-	settings.ExperimentalWireGuard.On(ctx, func(yn bool) {
-		t.maybeSpoof(yn)
-		t.setupReverserIfNeeded(yn)
-	})
+	t.allowincoming.Store(allowIncoming)
+	t.reconcileP2P()
 
 	if err := t.setRoutes(ifopts.ifaddrs); err != nil {
 		done()
