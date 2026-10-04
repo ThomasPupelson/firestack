@@ -40,6 +40,7 @@ const (
 
 var (
 	errNoServer    = errors.New("svc: no such server")
+	errNilServer   = errors.New("svc: nil server")
 	errSvcRunning  = errors.New("svc: service is running")
 	errNotUdp      = errors.New("svc: not udp conn")
 	errNotTcp      = errors.New("svc: not tcp conn")
@@ -99,15 +100,20 @@ func (s *services) AddServer(typ, id, url string) (svc x.Server, err error) {
 
 	switch typ {
 	case SVCSOCKS5, PXSOCKS5:
-		svc, err = newSocks5Server(id, url, s.ctl, s.listener, s.smmch)
+		svc, err = newSocks5Server(id, url, s.ctl, s.listener, s.queueSummary)
 	case SVCHTTP, PXHTTP:
-		svc, err = newHttpServer(id, url, s.ctl, s.listener, s.smmch)
+		svc, err = newHttpServer(id, url, s.ctl, s.listener, s.queueSummary)
 	default:
 		err = errors.ErrUnsupported
 	}
 
 	if err != nil {
 		return nil, err
+	}
+	// svc is unassigned (nil) in the default branch above; never store a nil
+	// server, else GetServer (and stopServers) will deref nil later
+	if svc == nil /*nilaway*/ {
+		return nil, errNilServer
 	}
 
 	s.Lock()
